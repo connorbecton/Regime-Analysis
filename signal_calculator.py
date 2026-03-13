@@ -79,20 +79,13 @@ def calculate_spread(prices: pd.DataFrame, defensive_etfs: list, cyclical_etfs: 
 
 def calculate_rolling_zscore(series: pd.Series, window: int = config.ZSCORE_WINDOW_WEEKS) -> pd.Series:
     """
-    Calculate z-score using EXPANDING window (all historical data)
-    
-    Z = (X - expanding_mean) / expanding_std
-    
-    Based on validation, Excel uses an expanding window that includes all data
-    from the start, not a fixed rolling window.
+    Calculate z-score using a rolling window (matches Excel implementation)
+
+    Z = (X - rolling_mean) / rolling_std
     """
-    # Calculate expanding statistics (uses all data from start up to current point)
-    expanding_mean = series.expanding(min_periods=config.MIN_HISTORY_WEEKS).mean()
-    expanding_std = series.expanding(min_periods=config.MIN_HISTORY_WEEKS).std()
-    
-    # Z-score
-    zscore = (series - expanding_mean) / expanding_std
-    
+    rolling_mean = series.rolling(window, min_periods=config.MIN_HISTORY_WEEKS).mean()
+    rolling_std = series.rolling(window, min_periods=config.MIN_HISTORY_WEEKS).std()
+    zscore = (series - rolling_mean) / rolling_std
     return zscore
 
 
