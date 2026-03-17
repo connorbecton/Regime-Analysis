@@ -65,7 +65,7 @@ MIN_COMPOSITE_SCORE = -MAX_COMPOSITE_SCORE
 
 # Data Source
 DATA_SOURCE = 'csv'  # 'yahoo' or 'csv'
-CSV_DATA_PATH = '/home/claude/regime_optimizer/price_data_clean.csv'
+CSV_DATA_PATH = 'Prices.csv'
 
 # Output
 VERBOSE = True
