@@ -83,11 +83,17 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
       })
-      
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP error! status: ${response.status}`)
+      }
+
       const data = await response.json()
       setCurrentRegime(data)
     } catch (error) {
       console.error('Error fetching current regime:', error)
+      alert(`Error fetching current regime: ${error.message}`)
     }
   }
 

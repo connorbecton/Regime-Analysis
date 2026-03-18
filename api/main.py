@@ -359,10 +359,17 @@ async def run_backtest(request: BacktestRequest):
         regime_counts = signals['Regime'].value_counts().to_dict()
         regime_changes = (signals['Regime'] != signals['Regime'].shift(1)).sum()
         
+        def _sf(v, default=0.0):
+            try:
+                f = float(v)
+                return default if (f != f or f == float('inf') or f == float('-inf')) else f
+            except (TypeError, ValueError):
+                return default
+
         # Get current regime
         current_regime = signals['Regime'].iloc[-1]
-        current_ewma = float(signals['EWMA_Score'].iloc[-1])
-        current_composite = float(signals['Composite'].iloc[-1])
+        current_ewma = _sf(signals['EWMA_Score'].iloc[-1])
+        current_composite = _sf(signals['Composite'].iloc[-1])
         
         return {
             "success": True,
@@ -414,31 +421,39 @@ async def get_current_regime(config: ModelConfig):
         
         latest = signals.iloc[-1]
         
+        def sf(v, default=0.0):
+            """NaN/inf-safe float for JSON serialization."""
+            try:
+                f = float(v)
+                return default if (f != f or f == float('inf') or f == float('-inf')) else f
+            except (TypeError, ValueError):
+                return default
+
         return {
             "date": signals.index[-1].strftime("%Y-%m-%d"),
             "regime": latest['Regime'],
-            "ewma_score": float(latest['EWMA_Score']),
-            "composite_score": float(latest['Composite']),
+            "ewma_score": sf(latest['EWMA_Score']),
+            "composite_score": sf(latest['Composite']),
             "signals": {
                 "defcyc": {
-                    "z_score": float(latest['Z_DefCyc']),
+                    "z_score": sf(latest['Z_DefCyc']),
                     "discrete": int(latest['Sc_DefCyc']),
-                    "weighted": float(latest['Wt_DefCyc'])
+                    "weighted": sf(latest['Wt_DefCyc'])
                 },
                 "valgrw": {
-                    "z_score": float(latest.get('Z_ValGrw', 0)),
+                    "z_score": sf(latest.get('Z_ValGrw', 0)),
                     "discrete": int(latest.get('Sc_ValGrw', 0)),
-                    "weighted": float(latest['Wt_ValGrw'])
+                    "weighted": sf(latest['Wt_ValGrw'])
                 },
                 "hidivmkt": {
-                    "z_score": float(latest.get('Z_HiDivMkt', 0)),
+                    "z_score": sf(latest.get('Z_HiDivMkt', 0)),
                     "discrete": int(latest.get('Sc_HiDivMkt', 0)),
-                    "weighted": float(latest['Wt_HiDivMkt'])
+                    "weighted": sf(latest['Wt_HiDivMkt'])
                 },
                 "crdsprd": {
-                    "z_score": float(latest.get('Z_CrdSprd', 0)),
+                    "z_score": sf(latest.get('Z_CrdSprd', 0)),
                     "discrete": int(latest.get('Sc_CrdSprd', 0)),
-                    "weighted": float(latest['Wt_CrdSprd'])
+                    "weighted": sf(latest['Wt_CrdSprd'])
                 }
             }
         }
