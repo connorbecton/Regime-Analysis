@@ -13,6 +13,7 @@ import logging
 import traceback
 import requests
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -104,82 +105,91 @@ def _yahoo_session() -> requests.Session:
     return session
 
 
-def _fetch_one_ticker(ticker: str, start_date: str, end_date: str,
-                      session: requests.Session) -> pd.Series:
+def _fetch_one_ticker(ticker: str, start_date: str, end_date: str) -> pd.Series:
     """
     Fetch adjusted weekly close prices for a single ticker via Yahoo Finance v8 chart API.
-    This is what yfinance calls internally — no C-extension dependencies required.
+    Creates its own session so this function is safe to call from multiple threads.
     """
     start_ts = int(datetime.strptime(start_date, "%Y-%m-%d")
                    .replace(tzinfo=timezone.utc).timestamp())
     end_ts = int((datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1))
                  .replace(tzinfo=timezone.utc).timestamp())
 
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        f"?period1={start_ts}&period2={end_ts}"
-        f"&interval=1wk&events=div%2Csplits&includeAdjustedClose=true"
-    )
+    # Try query1 first, fall back to query2 on failure
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            session = _yahoo_session()
+            url = (
+                f"https://{host}/v8/finance/chart/{ticker}"
+                f"?period1={start_ts}&period2={end_ts}"
+                f"&interval=1wk&events=div%2Csplits&includeAdjustedClose=true"
+            )
+            resp = session.get(url, timeout=10)
+            resp.raise_for_status()
 
-    resp = session.get(url, timeout=30)
-    resp.raise_for_status()
+            payload = resp.json()
+            result = payload.get('chart', {}).get('result')
+            if not result:
+                error = payload.get('chart', {}).get('error', 'unknown error')
+                raise ValueError(f"No chart data: {error}")
 
-    payload = resp.json()
-    result = payload.get('chart', {}).get('result')
-    if not result:
-        error = payload.get('chart', {}).get('error', 'unknown error')
-        raise ValueError(f"No chart data for {ticker}: {error}")
+            chart = result[0]
+            timestamps = chart['timestamp']
+            adj_closes = chart['indicators']['adjclose'][0]['adjclose']
 
-    chart = result[0]
-    timestamps = chart['timestamp']
-    adj_closes = chart['indicators']['adjclose'][0]['adjclose']
+            dates = pd.to_datetime(
+                [datetime.utcfromtimestamp(ts) for ts in timestamps], utc=True
+            ).tz_convert(None)
 
-    dates = pd.to_datetime(
-        [datetime.utcfromtimestamp(ts) for ts in timestamps], utc=True
-    ).tz_convert(None)
+            series = pd.Series(adj_closes, index=dates, name=ticker, dtype=float)
+            return series.dropna()
+        except Exception:
+            continue  # try next host
 
-    series = pd.Series(adj_closes, index=dates, name=ticker, dtype=float)
-    return series.dropna()
+    raise ValueError(f"Both Yahoo Finance hosts failed for {ticker}")
 
 
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch dividend-adjusted price data directly from Yahoo Finance v8 API.
-    Returns weekly Friday-resampled prices. Retries each ticker up to 3 times.
-    No yfinance dependency — uses requests only.
+    Fetches all tickers in parallel (up to 10 threads) so total time is bounded
+    by the slowest single ticker, not the sum of all tickers.
+    Returns weekly Friday-resampled prices.
     """
-    logger.info(f"Fetching data for {len(tickers)} tickers from {start_date} to {end_date}")
+    logger.info(f"Fetching {len(tickers)} tickers in parallel from {start_date} to {end_date}")
 
-    session = _yahoo_session()
-    close_series: Dict[str, pd.Series] = {}
-    last_error = None
-
-    for ticker in tickers:
+    def fetch_with_retry(ticker: str):
+        last_err = None
         for attempt in range(3):
             try:
                 if attempt > 0:
-                    delay = 2 ** attempt  # 2s, 4s
-                    logger.info(f"{ticker}: retry {attempt + 1}, waiting {delay}s...")
-                    time.sleep(delay)
-                close_series[ticker] = _fetch_one_ticker(ticker, start_date, end_date, session)
-                break
+                    time.sleep(attempt)  # 1s, 2s — keep short to avoid timeout
+                return ticker, _fetch_one_ticker(ticker, start_date, end_date)
             except Exception as e:
-                last_error = e
+                last_err = e
                 logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
-        else:
-            logger.error(f"Failed to fetch {ticker} after 3 attempts: {last_error}")
+        logger.error(f"Failed to fetch {ticker}: {last_err}")
+        return ticker, None
+
+    close_series: Dict[str, pd.Series] = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(fetch_with_retry, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, series = future.result()
+            if series is not None:
+                close_series[ticker] = series
 
     if not close_series:
         raise HTTPException(
             status_code=500,
-            detail=f"Could not fetch data for any ticker. Last error: {last_error}"
+            detail="Could not fetch data for any ticker from Yahoo Finance."
         )
 
     df = pd.DataFrame(close_series)
     df = df.resample('W-FRI').last()
     df = df.ffill()
 
-    logger.info(f"Fetched {len(df)} weeks of data for {len(df.columns)} tickers")
+    logger.info(f"Fetched {len(df)} weeks for {len(df.columns)}/{len(tickers)} tickers")
     return df
 
 def calculate_momentum(prices: pd.DataFrame, lookback: int = 13) -> pd.DataFrame:
