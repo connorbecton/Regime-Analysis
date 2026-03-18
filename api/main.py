@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
 import traceback
@@ -90,8 +90,8 @@ class BacktestRequest(BaseModel):
 # CORE CALCULATION FUNCTIONS
 # ============================================================================
 
-def _yahoo_session() -> requests.Session:
-    """Create a requests session with browser-like headers to reduce cloud IP rate limiting."""
+def _make_session() -> requests.Session:
+    """Plain requests session with a browser User-Agent."""
     session = requests.Session()
     session.headers.update({
         'User-Agent': (
@@ -99,107 +99,63 @@ def _yahoo_session() -> requests.Session:
             'AppleWebKit/537.36 (KHTML, like Gecko) '
             'Chrome/120.0.0.0 Safari/537.36'
         ),
-        'Accept': 'application/json,text/plain,*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Origin': 'https://finance.yahoo.com',
-        'Referer': 'https://finance.yahoo.com/',
     })
     return session
 
 
-def _get_yahoo_crumb(session: requests.Session) -> str:
-    """
-    Obtain a Yahoo Finance API crumb (required since 2024 to avoid 429 rate limiting).
-    Visits fc.yahoo.com first to get session cookies, then fetches the crumb token.
-    """
-    try:
-        session.get('https://fc.yahoo.com', timeout=5)
-    except Exception:
-        pass  # Best-effort cookie priming; proceed anyway
-
-    resp = session.get(
-        'https://query1.finance.yahoo.com/v1/test/getcrumb',
-        timeout=10
-    )
-    resp.raise_for_status()
-    crumb = resp.text.strip()
-    if not crumb:
-        raise ValueError("Yahoo Finance returned an empty crumb")
-    logger.info("Obtained Yahoo Finance crumb successfully")
-    return crumb
-
-
 def _fetch_one_ticker(ticker: str, start_date: str, end_date: str,
-                      session: requests.Session, crumb: str) -> pd.Series:
+                      session: requests.Session) -> pd.Series:
     """
-    Fetch adjusted weekly close prices for a single ticker via Yahoo Finance v8 chart API.
-    Requires a valid crumb (from _get_yahoo_crumb) to avoid 429 rate limiting.
-    Tries query1 then query2 as fallback.
+    Fetch weekly close prices from stooq.com for a single ticker.
+    stooq serves plain CSV with no auth — cloud IPs are not blocked.
+    Returns a Series indexed by date.
     """
-    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d")
-                   .replace(tzinfo=timezone.utc).timestamp())
-    end_ts = int((datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1))
-                 .replace(tzinfo=timezone.utc).timestamp())
+    from io import StringIO
 
-    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
-        try:
-            url = (
-                f"https://{host}/v8/finance/chart/{ticker}"
-                f"?period1={start_ts}&period2={end_ts}"
-                f"&interval=1wk&events=div%2Csplits&includeAdjustedClose=true"
-                f"&crumb={crumb}"
-            )
-            resp = session.get(url, timeout=10)
-            resp.raise_for_status()
+    d1 = start_date.replace('-', '')  # YYYYMMDD
+    d2 = end_date.replace('-', '')
+    stooq_ticker = ticker.lower() + '.us'
 
-            payload = resp.json()
-            result = payload.get('chart', {}).get('result')
-            if not result:
-                error = payload.get('chart', {}).get('error', 'unknown error')
-                raise ValueError(f"No chart data: {error}")
+    url = f"https://stooq.com/q/d/l/?s={stooq_ticker}&d1={d1}&d2={d2}&i=w"
+    resp = session.get(url, timeout=15)
+    resp.raise_for_status()
 
-            chart = result[0]
-            timestamps = chart['timestamp']
-            adj_closes = chart['indicators']['adjclose'][0]['adjclose']
+    content = resp.text.strip()
+    # stooq returns an HTML page or a short message when ticker is unknown
+    if not content or content.startswith('<') or len(content.splitlines()) < 2:
+        raise ValueError(f"No data from stooq for {ticker} (ticker may not exist there)")
 
-            dates = pd.to_datetime(
-                [datetime.utcfromtimestamp(ts) for ts in timestamps], utc=True
-            ).tz_convert(None)
+    df = pd.read_csv(StringIO(content), parse_dates=['Date'])
+    df = df.set_index('Date').sort_index()
 
-            series = pd.Series(adj_closes, index=dates, name=ticker, dtype=float)
-            return series.dropna()
-        except Exception:
-            continue  # try next host
+    if 'Close' not in df.columns:
+        raise ValueError(f"Unexpected stooq format for {ticker}: {df.columns.tolist()}")
 
-    raise ValueError(f"Both Yahoo Finance hosts failed for {ticker}")
+    return df['Close'].rename(ticker).dropna()
 
 
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Fetch dividend-adjusted price data directly from Yahoo Finance v8 API.
-    Authenticates with a crumb token (required since 2024 to avoid 429s on cloud IPs).
-    Fetches all tickers in parallel (up to 10 threads) so total time is bounded
-    by the slowest single ticker, not the sum of all tickers.
+    Fetch price data from stooq.com for all tickers in parallel.
+    stooq.com is used instead of Yahoo Finance because Yahoo Finance actively
+    blocks cloud provider IPs with 429 errors (even the auth endpoint).
     Returns weekly Friday-resampled prices.
     """
-    logger.info(f"Fetching {len(tickers)} tickers in parallel from {start_date} to {end_date}")
+    logger.info(f"Fetching {len(tickers)} tickers from stooq.com ({start_date} to {end_date})")
 
-    # One session + crumb shared across all parallel fetches
-    session = _yahoo_session()
-    crumb = _get_yahoo_crumb(session)
+    session = _make_session()
 
     def fetch_with_retry(ticker: str):
         last_err = None
         for attempt in range(3):
             try:
                 if attempt > 0:
-                    time.sleep(attempt)  # 1s, 2s — keep short to avoid timeout
-                return ticker, _fetch_one_ticker(ticker, start_date, end_date, session, crumb)
+                    time.sleep(attempt)
+                return ticker, _fetch_one_ticker(ticker, start_date, end_date, session)
             except Exception as e:
                 last_err = e
                 logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
-        logger.error(f"Failed to fetch {ticker}: {last_err}")
+        logger.error(f"Giving up on {ticker}: {last_err}")
         return ticker, None
 
     close_series: Dict[str, pd.Series] = {}
