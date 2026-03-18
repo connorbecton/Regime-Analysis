@@ -11,6 +11,8 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
+import traceback
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -92,32 +94,47 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
     logger.info(f"Fetching data for {len(tickers)} tickers from {start_date} to {end_date}")
     
     try:
-        # Download data (Adj Close is dividend-adjusted)
+        # Use a browser-like user-agent to avoid rate limiting on cloud IPs
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': (
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0.0.0 Safari/537.36'
+            )
+        })
+
+        # Download data (auto_adjust gives dividend-adjusted prices)
         data = yf.download(
             tickers,
             start=start_date,
             end=end_date,
             progress=False,
-            auto_adjust=True  # This gives us adjusted prices
+            auto_adjust=True,
+            session=session,
         )
-        
-        # If single ticker, reshape
-        if len(tickers) == 1:
-            df = pd.DataFrame({tickers[0]: data['Close']})
-        else:
+
+        if data.empty:
+            raise ValueError(f"yfinance returned empty data for tickers: {tickers}")
+
+        # Extract Close prices — handle both flat and MultiIndex columns
+        if isinstance(data.columns, pd.MultiIndex):
             df = data['Close']
-        
+        else:
+            # Single ticker returns flat columns
+            df = pd.DataFrame({tickers[0]: data['Close']})
+
         # Resample to weekly (Fridays)
         df = df.resample('W-FRI').last()
-        
+
         # Forward fill missing data
         df = df.ffill()
-        
+
         logger.info(f"Fetched {len(df)} weeks of data")
         return df
-        
+
     except Exception as e:
-        logger.error(f"Error fetching data: {e}")
+        logger.error(f"Error fetching data: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error fetching price data: {str(e)}")
 
 def calculate_momentum(prices: pd.DataFrame, lookback: int = 13) -> pd.DataFrame:
