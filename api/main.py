@@ -111,7 +111,7 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
         df = df.resample('W-FRI').last()
         
         # Forward fill missing data
-        df = df.fillna(method='ffill')
+        df = df.ffill()
         
         logger.info(f"Fetched {len(df)} weeks of data")
         return df
@@ -230,8 +230,8 @@ def backtest_portfolio(prices: pd.DataFrame, signals: pd.DataFrame,
                        portfolio: PortfolioAllocation) -> Dict:
     """Backtest portfolio allocations based on regimes"""
     
-    # Calculate daily returns for each ETF
-    returns = prices.pct_change()
+    # Calculate weekly returns for each ETF (drop first NaN row)
+    returns = prices.pct_change().dropna(how='all')
     
     # Initialize portfolio value
     portfolio_value = []
@@ -282,11 +282,27 @@ def backtest_portfolio(prices: pd.DataFrame, signals: pd.DataFrame,
                 'win_rate': float((regime_data['return'] > 0).mean())
             }
     
+    def safe_float(v):
+        """Return None for NaN/inf so the JSON stays valid."""
+        try:
+            f = float(v)
+            return None if (f != f or f == float('inf') or f == float('-inf')) else f
+        except (TypeError, ValueError):
+            return None
+
+    equity_curve = []
+    for rec in df_performance[['date', 'cumulative', 'regime']].to_dict('records'):
+        equity_curve.append({
+            'date': rec['date'].strftime('%Y-%m-%d') if hasattr(rec['date'], 'strftime') else str(rec['date']),
+            'cumulative': safe_float(rec['cumulative']),
+            'regime': rec['regime'],
+        })
+
     return {
-        'total_return': float(total_return),
-        'annualized_return': float(annualized_return),
+        'total_return': safe_float(total_return),
+        'annualized_return': safe_float(annualized_return),
         'regime_stats': regime_stats,
-        'equity_curve': df_performance[['date', 'cumulative', 'regime']].to_dict('records')
+        'equity_curve': equity_curve,
     }
 
 # ============================================================================
@@ -363,7 +379,15 @@ async def run_backtest(request: BacktestRequest):
                 "changes_per_year": float(regime_changes / (len(signals) / 52))
             },
             "performance": backtest_results,
-            "signal_history": signals[['EWMA_Score', 'Composite', 'Regime']].tail(52).to_dict('records')
+            "signal_history": [
+                {
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "ewma_score": float(row['EWMA_Score']) if pd.notna(row['EWMA_Score']) else None,
+                    "composite": float(row['Composite']) if pd.notna(row['Composite']) else None,
+                    "regime": row['Regime'],
+                }
+                for idx, row in signals[['EWMA_Score', 'Composite', 'Regime']].tail(52).iterrows()
+            ]
         }
         
     except Exception as e:
