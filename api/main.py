@@ -99,30 +99,56 @@ def _yahoo_session() -> requests.Session:
             'AppleWebKit/537.36 (KHTML, like Gecko) '
             'Chrome/120.0.0.0 Safari/537.36'
         ),
-        'Accept': 'application/json',
+        'Accept': 'application/json,text/plain,*/*',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Origin': 'https://finance.yahoo.com',
+        'Referer': 'https://finance.yahoo.com/',
     })
     return session
 
 
-def _fetch_one_ticker(ticker: str, start_date: str, end_date: str) -> pd.Series:
+def _get_yahoo_crumb(session: requests.Session) -> str:
+    """
+    Obtain a Yahoo Finance API crumb (required since 2024 to avoid 429 rate limiting).
+    Visits fc.yahoo.com first to get session cookies, then fetches the crumb token.
+    """
+    try:
+        session.get('https://fc.yahoo.com', timeout=5)
+    except Exception:
+        pass  # Best-effort cookie priming; proceed anyway
+
+    resp = session.get(
+        'https://query1.finance.yahoo.com/v1/test/getcrumb',
+        timeout=10
+    )
+    resp.raise_for_status()
+    crumb = resp.text.strip()
+    if not crumb:
+        raise ValueError("Yahoo Finance returned an empty crumb")
+    logger.info("Obtained Yahoo Finance crumb successfully")
+    return crumb
+
+
+def _fetch_one_ticker(ticker: str, start_date: str, end_date: str,
+                      session: requests.Session, crumb: str) -> pd.Series:
     """
     Fetch adjusted weekly close prices for a single ticker via Yahoo Finance v8 chart API.
-    Creates its own session so this function is safe to call from multiple threads.
+    Requires a valid crumb (from _get_yahoo_crumb) to avoid 429 rate limiting.
+    Tries query1 then query2 as fallback.
     """
     start_ts = int(datetime.strptime(start_date, "%Y-%m-%d")
                    .replace(tzinfo=timezone.utc).timestamp())
     end_ts = int((datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1))
                  .replace(tzinfo=timezone.utc).timestamp())
 
-    # Try query1 first, fall back to query2 on failure
     for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
         try:
-            session = _yahoo_session()
             url = (
                 f"https://{host}/v8/finance/chart/{ticker}"
                 f"?period1={start_ts}&period2={end_ts}"
                 f"&interval=1wk&events=div%2Csplits&includeAdjustedClose=true"
+                f"&crumb={crumb}"
             )
             resp = session.get(url, timeout=10)
             resp.raise_for_status()
@@ -152,11 +178,16 @@ def _fetch_one_ticker(ticker: str, start_date: str, end_date: str) -> pd.Series:
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch dividend-adjusted price data directly from Yahoo Finance v8 API.
+    Authenticates with a crumb token (required since 2024 to avoid 429s on cloud IPs).
     Fetches all tickers in parallel (up to 10 threads) so total time is bounded
     by the slowest single ticker, not the sum of all tickers.
     Returns weekly Friday-resampled prices.
     """
     logger.info(f"Fetching {len(tickers)} tickers in parallel from {start_date} to {end_date}")
+
+    # One session + crumb shared across all parallel fetches
+    session = _yahoo_session()
+    crumb = _get_yahoo_crumb(session)
 
     def fetch_with_retry(ticker: str):
         last_err = None
@@ -164,7 +195,7 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
             try:
                 if attempt > 0:
                     time.sleep(attempt)  # 1s, 2s — keep short to avoid timeout
-                return ticker, _fetch_one_ticker(ticker, start_date, end_date)
+                return ticker, _fetch_one_ticker(ticker, start_date, end_date, session, crumb)
             except Exception as e:
                 last_err = e
                 logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
