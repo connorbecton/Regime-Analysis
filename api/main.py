@@ -96,12 +96,13 @@ class BacktestRequest(BaseModel):
 
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Fetch dividend-adjusted price data from Yahoo Finance
-    Returns weekly Friday prices. Retries up to 3 times with backoff.
+    Fetch dividend-adjusted price data from Yahoo Finance via individual Ticker calls.
+    Using yf.Ticker.history() per ticker is more reliable on cloud IPs than yf.download().
+    Retries each ticker up to 3 times with exponential backoff.
     """
     logger.info(f"Fetching data for {len(tickers)} tickers from {start_date} to {end_date}")
 
-    # Use a browser-like user-agent to avoid rate limiting on cloud IPs
+    # Browser-like user-agent to reduce rate limiting on cloud IPs
     session = requests.Session()
     session.headers.update({
         'User-Agent': (
@@ -111,50 +112,49 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
         )
     })
 
-    last_error = None
-    for attempt in range(3):
-        try:
-            if attempt > 0:
-                delay = 2 ** attempt  # 2s, 4s
-                logger.info(f"Retry attempt {attempt + 1}, waiting {delay}s...")
-                time.sleep(delay)
+    close_series: Dict[str, pd.Series] = {}
+    for ticker in tickers:
+        last_error = None
+        for attempt in range(3):
+            try:
+                if attempt > 0:
+                    delay = 2 ** attempt  # 2s, 4s
+                    logger.info(f"{ticker}: retry {attempt + 1}, waiting {delay}s...")
+                    time.sleep(delay)
 
-            # threads=False avoids threading issues in serverless environments
-            data = yf.download(
-                tickers,
-                start=start_date,
-                end=end_date,
-                progress=False,
-                auto_adjust=True,
-                threads=False,
-                session=session,
-            )
+                t = yf.Ticker(ticker, session=session)
+                hist = t.history(
+                    start=start_date,
+                    end=end_date,
+                    auto_adjust=True,
+                )
+                if hist.empty:
+                    raise ValueError(f"No data returned for {ticker}")
+                close_series[ticker] = hist['Close']
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
+        else:
+            # All 3 attempts failed for this ticker — log and skip rather than abort
+            logger.error(f"Failed to fetch {ticker} after 3 attempts: {last_error}")
 
-            if data.empty:
-                raise ValueError(f"yfinance returned empty data for tickers: {tickers}")
+    if not close_series:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not fetch data for any ticker. Last error: {last_error}"
+        )
 
-            # Extract Close prices — handle both flat and MultiIndex columns
-            if isinstance(data.columns, pd.MultiIndex):
-                df = data['Close']
-            else:
-                # Single ticker returns flat columns
-                df = pd.DataFrame({tickers[0]: data['Close']})
+    df = pd.DataFrame(close_series)
 
-            # Resample to weekly (Fridays)
-            df = df.resample('W-FRI').last()
+    # Resample to weekly (Fridays)
+    df = df.resample('W-FRI').last()
 
-            # Forward fill missing data
-            df = df.ffill()
+    # Forward fill missing data
+    df = df.ffill()
 
-            logger.info(f"Fetched {len(df)} weeks of data")
-            return df
-
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Attempt {attempt + 1} failed: {e}")
-
-    logger.error(f"All fetch attempts failed: {last_error}\n{traceback.format_exc()}")
-    raise HTTPException(status_code=500, detail=f"Error fetching price data: {str(last_error)}")
+    logger.info(f"Fetched {len(df)} weeks of data for {len(df.columns)} tickers")
+    return df
 
 def calculate_momentum(prices: pd.DataFrame, lookback: int = 13) -> pd.DataFrame:
     """Calculate log momentum over lookback period"""
