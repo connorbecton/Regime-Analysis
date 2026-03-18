@@ -4,11 +4,10 @@ FastAPI backend for regime model backtesting
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import yfinance as yf
+from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import logging
 import traceback
@@ -84,59 +83,90 @@ class BacktestRequest(BaseModel):
     config: ModelConfig
     portfolio: PortfolioAllocation
     start_date: str = "2016-01-01"
-    end_date: str = ""
-
-    def model_post_init(self, __context) -> None:
-        if not self.end_date:
-            self.end_date = _today()
+    end_date: str = Field(default_factory=_today)
 
 # ============================================================================
 # CORE CALCULATION FUNCTIONS
 # ============================================================================
 
-def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetch dividend-adjusted price data from Yahoo Finance via individual Ticker calls.
-    Using yf.Ticker.history() per ticker is more reliable on cloud IPs than yf.download().
-    Retries each ticker up to 3 times with exponential backoff.
-    """
-    logger.info(f"Fetching data for {len(tickers)} tickers from {start_date} to {end_date}")
-
-    # Browser-like user-agent to reduce rate limiting on cloud IPs
+def _yahoo_session() -> requests.Session:
+    """Create a requests session with browser-like headers to reduce cloud IP rate limiting."""
     session = requests.Session()
     session.headers.update({
         'User-Agent': (
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
             'AppleWebKit/537.36 (KHTML, like Gecko) '
             'Chrome/120.0.0.0 Safari/537.36'
-        )
+        ),
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
     })
+    return session
 
+
+def _fetch_one_ticker(ticker: str, start_date: str, end_date: str,
+                      session: requests.Session) -> pd.Series:
+    """
+    Fetch adjusted weekly close prices for a single ticker via Yahoo Finance v8 chart API.
+    This is what yfinance calls internally — no C-extension dependencies required.
+    """
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d")
+                   .replace(tzinfo=timezone.utc).timestamp())
+    end_ts = int((datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1))
+                 .replace(tzinfo=timezone.utc).timestamp())
+
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        f"?period1={start_ts}&period2={end_ts}"
+        f"&interval=1wk&events=div%2Csplits&includeAdjustedClose=true"
+    )
+
+    resp = session.get(url, timeout=30)
+    resp.raise_for_status()
+
+    payload = resp.json()
+    result = payload.get('chart', {}).get('result')
+    if not result:
+        error = payload.get('chart', {}).get('error', 'unknown error')
+        raise ValueError(f"No chart data for {ticker}: {error}")
+
+    chart = result[0]
+    timestamps = chart['timestamp']
+    adj_closes = chart['indicators']['adjclose'][0]['adjclose']
+
+    dates = pd.to_datetime(
+        [datetime.utcfromtimestamp(ts) for ts in timestamps], utc=True
+    ).tz_convert(None)
+
+    series = pd.Series(adj_closes, index=dates, name=ticker, dtype=float)
+    return series.dropna()
+
+
+def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetch dividend-adjusted price data directly from Yahoo Finance v8 API.
+    Returns weekly Friday-resampled prices. Retries each ticker up to 3 times.
+    No yfinance dependency — uses requests only.
+    """
+    logger.info(f"Fetching data for {len(tickers)} tickers from {start_date} to {end_date}")
+
+    session = _yahoo_session()
     close_series: Dict[str, pd.Series] = {}
+    last_error = None
+
     for ticker in tickers:
-        last_error = None
         for attempt in range(3):
             try:
                 if attempt > 0:
                     delay = 2 ** attempt  # 2s, 4s
                     logger.info(f"{ticker}: retry {attempt + 1}, waiting {delay}s...")
                     time.sleep(delay)
-
-                t = yf.Ticker(ticker, session=session)
-                hist = t.history(
-                    start=start_date,
-                    end=end_date,
-                    auto_adjust=True,
-                )
-                if hist.empty:
-                    raise ValueError(f"No data returned for {ticker}")
-                close_series[ticker] = hist['Close']
+                close_series[ticker] = _fetch_one_ticker(ticker, start_date, end_date, session)
                 break
             except Exception as e:
                 last_error = e
                 logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
         else:
-            # All 3 attempts failed for this ticker — log and skip rather than abort
             logger.error(f"Failed to fetch {ticker} after 3 attempts: {last_error}")
 
     if not close_series:
@@ -146,11 +176,7 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
         )
 
     df = pd.DataFrame(close_series)
-
-    # Resample to weekly (Fridays)
     df = df.resample('W-FRI').last()
-
-    # Forward fill missing data
     df = df.ffill()
 
     logger.info(f"Fetched {len(df)} weeks of data for {len(df.columns)} tickers")
