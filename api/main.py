@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 import logging
 import traceback
 import requests
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,12 +76,19 @@ class PortfolioAllocation(BaseModel):
         "XLK": 0.05, "XLY": 0.05, "XLC": 0.05
     }
 
+def _today() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
 class BacktestRequest(BaseModel):
     """Request for backtesting"""
     config: ModelConfig
     portfolio: PortfolioAllocation
     start_date: str = "2016-01-01"
-    end_date: str = "2026-03-15"
+    end_date: str = ""
+
+    def model_post_init(self, __context) -> None:
+        if not self.end_date:
+            self.end_date = _today()
 
 # ============================================================================
 # CORE CALCULATION FUNCTIONS
@@ -89,53 +97,64 @@ class BacktestRequest(BaseModel):
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch dividend-adjusted price data from Yahoo Finance
-    Returns weekly Friday prices
+    Returns weekly Friday prices. Retries up to 3 times with backoff.
     """
     logger.info(f"Fetching data for {len(tickers)} tickers from {start_date} to {end_date}")
-    
-    try:
-        # Use a browser-like user-agent to avoid rate limiting on cloud IPs
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': (
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0.0.0 Safari/537.36'
-            )
-        })
 
-        # Download data (auto_adjust gives dividend-adjusted prices)
-        data = yf.download(
-            tickers,
-            start=start_date,
-            end=end_date,
-            progress=False,
-            auto_adjust=True,
-            session=session,
+    # Use a browser-like user-agent to avoid rate limiting on cloud IPs
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': (
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Safari/537.36'
         )
+    })
 
-        if data.empty:
-            raise ValueError(f"yfinance returned empty data for tickers: {tickers}")
+    last_error = None
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                delay = 2 ** attempt  # 2s, 4s
+                logger.info(f"Retry attempt {attempt + 1}, waiting {delay}s...")
+                time.sleep(delay)
 
-        # Extract Close prices — handle both flat and MultiIndex columns
-        if isinstance(data.columns, pd.MultiIndex):
-            df = data['Close']
-        else:
-            # Single ticker returns flat columns
-            df = pd.DataFrame({tickers[0]: data['Close']})
+            # threads=False avoids threading issues in serverless environments
+            data = yf.download(
+                tickers,
+                start=start_date,
+                end=end_date,
+                progress=False,
+                auto_adjust=True,
+                threads=False,
+                session=session,
+            )
 
-        # Resample to weekly (Fridays)
-        df = df.resample('W-FRI').last()
+            if data.empty:
+                raise ValueError(f"yfinance returned empty data for tickers: {tickers}")
 
-        # Forward fill missing data
-        df = df.ffill()
+            # Extract Close prices — handle both flat and MultiIndex columns
+            if isinstance(data.columns, pd.MultiIndex):
+                df = data['Close']
+            else:
+                # Single ticker returns flat columns
+                df = pd.DataFrame({tickers[0]: data['Close']})
 
-        logger.info(f"Fetched {len(df)} weeks of data")
-        return df
+            # Resample to weekly (Fridays)
+            df = df.resample('W-FRI').last()
 
-    except Exception as e:
-        logger.error(f"Error fetching data: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error fetching price data: {str(e)}")
+            # Forward fill missing data
+            df = df.ffill()
+
+            logger.info(f"Fetched {len(df)} weeks of data")
+            return df
+
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Attempt {attempt + 1} failed: {e}")
+
+    logger.error(f"All fetch attempts failed: {last_error}\n{traceback.format_exc()}")
+    raise HTTPException(status_code=500, detail=f"Error fetching price data: {str(last_error)}")
 
 def calculate_momentum(prices: pd.DataFrame, lookback: int = 13) -> pd.DataFrame:
     """Calculate log momentum over lookback period"""
@@ -422,9 +441,9 @@ async def run_backtest(request: BacktestRequest):
 async def get_current_regime(config: ModelConfig):
     """Get current regime reading with live data"""
     try:
-        # Fetch last 2 years of data for z-score calculation
+        # Fetch enough history for the 252-week z-score window (~5yr) plus buffer
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=365*2)
+        start_date = end_date - timedelta(days=365*6)
         
         tickers = ["XLU", "XLP", "XLV", "RPV", "RPG", "VYM", "SPY", "VSCH", "HYG"] + config.cyclical_etfs
         

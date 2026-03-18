@@ -57,7 +57,7 @@ function App() {
           config,
           portfolio,
           start_date: '2016-01-01',
-          end_date: '2026-03-15'
+          end_date: new Date().toISOString().split('T')[0]
         })
       })
       
