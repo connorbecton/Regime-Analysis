@@ -1,8 +1,0 @@
-{
-  "name": "regime-analysis",
-  "version": "1.0.0",
-  "description": "Enhanced Momentum Regime Model - signal calculator and optimizer",
-  "scripts": {
-    "dev": "python3 signal_calculator.py"
-  }
-}
