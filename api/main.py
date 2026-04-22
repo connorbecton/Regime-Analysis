@@ -4,6 +4,7 @@ FastAPI backend for regime model backtesting
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from mangum import Mangum
 from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
@@ -566,5 +567,5 @@ async def get_current_regime(config: ModelConfig):
         logger.error(f"Current regime error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# For Vercel serverless deployment
-app = app
+# Vercel serverless entry point — mangum adapts ASGI (FastAPI) to AWS Lambda / Vercel handler protocol
+handler = Mangum(app, lifespan="off")
