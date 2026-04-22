@@ -107,48 +107,62 @@ export default function ConfigEditor({ config, setConfig }) {
         </button>
         
         {expanded.thresholds && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
-              <label className="label">Risk-On Threshold</label>
+              <label className="label">MomDiv Threshold (±)</label>
               <input
                 type="number"
                 step="0.5"
-                value={config.threshold_riskon}
-                onChange={(e) => updateConfig('threshold_riskon', e.target.value)}
+                value={config.threshold_momdiv}
+                onChange={(e) => updateConfig('threshold_momdiv', e.target.value)}
                 className="input font-mono"
               />
               <p className="text-xs text-gray-500 mt-1">
-                Enter when EWMA ≤ this value
+                Defensive if score ≥ +X, Risk-On if ≤ −X
               </p>
             </div>
 
             <div>
-              <label className="label">Defensive Threshold</label>
-              <input
-                type="number"
-                step="0.5"
-                value={config.threshold_defensive}
-                onChange={(e) => updateConfig('threshold_defensive', e.target.value)}
-                className="input font-mono"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Enter when EWMA ≥ this value
-              </p>
-            </div>
-
-            <div>
-              <label className="label">EWMA Span (weeks)</label>
+              <label className="label">Fast EWMA Span</label>
               <input
                 type="number"
                 step="1"
-                min="3"
-                max="10"
-                value={config.ewma_span}
-                onChange={(e) => updateConfig('ewma_span', e.target.value)}
+                min="2"
+                max="15"
+                value={config.ewma_span_fast}
+                onChange={(e) => updateConfig('ewma_span_fast', e.target.value)}
+                className="input font-mono"
+              />
+              <p className="text-xs text-gray-500 mt-1">Short, aggressive (default: 3)</p>
+            </div>
+
+            <div>
+              <label className="label">Slow EWMA Span</label>
+              <input
+                type="number"
+                step="1"
+                min="2"
+                max="20"
+                value={config.ewma_span_slow}
+                onChange={(e) => updateConfig('ewma_span_slow', e.target.value)}
+                className="input font-mono"
+              />
+              <p className="text-xs text-gray-500 mt-1">Long, conservative (default: 5)</p>
+            </div>
+
+            <div>
+              <label className="label">Lambda (blend weight)</label>
+              <input
+                type="number"
+                step="0.05"
+                min="0"
+                max="1"
+                value={config.lambda_blend}
+                onChange={(e) => updateConfig('lambda_blend', e.target.value)}
                 className="input font-mono"
               />
               <p className="text-xs text-gray-500 mt-1">
-                Smoothing period (optimal: 6)
+                0 = slow only, 1 = fast only (default: 0.8)
               </p>
             </div>
           </div>
@@ -220,46 +234,45 @@ export default function ConfigEditor({ config, setConfig }) {
 
       {/* Preset Configs */}
       <div className="card bg-blue-50 border-blue-200">
-        <h3 className="font-semibold text-gray-900 mb-3">Quick Presets</h3>
+        <h3 className="font-semibold text-gray-900 mb-3">Quick Presets (MomDiv)</h3>
         <div className="flex flex-wrap gap-2">
           <button
             onClick={() => setConfig({
               ...config,
-              weight_defcyc: 2.0,
-              weight_valgrw: 2.0,
-              weight_hidivmkt: 3.0,
-              weight_crdsprd: 2.0,
-              threshold_defensive: 7.0,
-              threshold_riskon: -7.0,
-              ewma_span: 6
+              threshold_momdiv: 4.0,
+              ewma_span_fast: 3,
+              ewma_span_slow: 5,
+              lambda_blend: 0.8
             })}
             className="btn btn-primary text-sm"
           >
-            Optimal (±7, Span 6)
+            Default (±4, 3/5, λ=0.8)
           </button>
-          
+
           <button
             onClick={() => setConfig({
               ...config,
-              threshold_defensive: 8.0,
-              threshold_riskon: -8.0,
-              ewma_span: 6
+              threshold_momdiv: 5.0,
+              ewma_span_fast: 3,
+              ewma_span_slow: 8,
+              lambda_blend: 0.7
             })}
             className="btn btn-secondary text-sm"
           >
-            Conservative (±8)
+            Conservative (±5, 3/8)
           </button>
-          
+
           <button
             onClick={() => setConfig({
               ...config,
-              threshold_defensive: 6.0,
-              threshold_riskon: -6.0,
-              ewma_span: 5
+              threshold_momdiv: 3.0,
+              ewma_span_fast: 2,
+              ewma_span_slow: 4,
+              lambda_blend: 0.9
             })}
             className="btn btn-secondary text-sm"
           >
-            Aggressive (±6)
+            Aggressive (±3, 2/4)
           </button>
         </div>
       </div>
