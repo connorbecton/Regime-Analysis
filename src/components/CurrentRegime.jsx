@@ -17,12 +17,23 @@ export default function CurrentRegime({ data }) {
     return 'text-gray-600'
   }
 
-  // Fallbacks so the UI still renders against older API payloads
+  // Fallbacks so UI still renders against older API payloads
   const momdiv = data.momdiv_score ?? data.ewma_score ?? 0
   const composite = data.composite_score ?? 0
   const fast = data.fast_ewma
   const slow = data.slow_ewma
   const divergence = data.divergence
+  const baskets = data.baskets || {}
+  const weights = data.weights || {}
+
+  // Signal display metadata — order & labels match Excel Enhanced_Signals
+  const SIGNAL_META = {
+    defcyc:   { label: 'Def vs Cyc',       basketA: baskets.defensive, basketB: baskets.cyclical,   wKey: 'defcyc' },
+    lobhib:   { label: 'Lo Beta vs Hi Beta', basketA: baskets.low_beta, basketB: baskets.high_beta, wKey: 'lobhib' },
+    valgrw:   { label: 'Val vs Grw',       basketA: baskets.value,      basketB: baskets.growth,    wKey: 'valgrw' },
+    hidivmkt: { label: 'HiDiv vs Mkt',     basketA: baskets.high_div,   basketB: baskets.market,    wKey: 'hidivmkt' },
+    crdsprd:  { label: 'Credit Spread',    basketA: baskets.credit_safe,basketB: baskets.credit_risk,wKey: 'crdsprd' },
+  }
 
   return (
     <div className="card bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
@@ -92,26 +103,45 @@ export default function CurrentRegime({ data }) {
       {/* Signal Breakdown */}
       {data.signals && (
         <div className="mt-6 pt-6 border-t border-blue-200">
-          <div className="text-sm font-semibold text-gray-700 mb-3">Signal Breakdown (5 subscores -> Composite)</div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {Object.entries(data.signals).map(([name, signal]) => (
-              <div key={name} className="bg-white rounded-lg p-3 border border-gray-200">
-                <div className="text-xs text-gray-500 uppercase mb-1">
-                  {name === 'defcyc' ? 'Def vs Cyc' :
-                   name === 'valgrw' ? 'Val vs Grw' :
-                   name === 'hidivmkt' ? 'HiDiv vs Mkt' :
-                   'Credit Spread'}
+          <div className="text-sm font-semibold text-gray-700 mb-3">
+            Signal Breakdown (5 subscores → Composite)
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            {Object.entries(SIGNAL_META).map(([key, meta]) => {
+              const signal = data.signals[key]
+              if (\!signal) return null
+              const w = weights[meta.wKey]
+              const basketStr =
+                meta.basketA && meta.basketB
+                  ? `${meta.basketA.join('/')} − ${meta.basketB.join('/')}`
+                  : null
+              return (
+                <div key={key} className="bg-white rounded-lg p-3 border border-gray-200">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-xs text-gray-500 uppercase font-semibold">{meta.label}</div>
+                    {w \!== undefined && (
+                      <div className="text-[10px] text-gray-400">w={w}</div>
+                    )}
+                  </div>
+                  {basketStr && (
+                    <div className="text-[10px] text-gray-400 mb-1 truncate" title={basketStr}>
+                      {basketStr}
+                    </div>
+                  )}
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-lg font-bold font-mono">
+                      {Number(signal.weighted).toFixed(1)}
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      (z={Number(signal.z_score).toFixed(2)})
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-1">
+                    discrete: {signal.discrete}
+                  </div>
                 </div>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-lg font-bold font-mono">
-                    {Number(signal.weighted).toFixed(1)}
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    (z={Number(signal.z_score).toFixed(2)})
-                  </span>
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}

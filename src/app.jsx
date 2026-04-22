@@ -9,10 +9,10 @@ const API_URL = import.meta.env.PROD ? '/api' : 'http://localhost:8000/api'
 
 function App() {
   const [config, setConfig] = useState({
-    weight_defcyc: 2.0,
+    weight_defcyc: 3.0,
     weight_lobhib: 0.0,
     weight_valgrw: 2.0,
-    weight_hidivmkt: 3.0,
+    weight_hidivmkt: 2.0,
     weight_crdsprd: 2.0,
     threshold_defensive: 7.0,
     threshold_riskon: -7.0,
@@ -21,7 +21,7 @@ function App() {
     zscore_window: 252,
     zscore_moderate: 0.75,
     zscore_strong: 1.5,
-    cyclical_etfs: ['XLF', 'XLI', 'XLB'],
+    cyclical_etfs: ['XLF', 'XLI', 'XLK'],
     // MomDiv (speed-adjusted blend) params
     ewma_span_fast: 3,
     ewma_span_slow: 5,

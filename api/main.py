@@ -36,10 +36,10 @@ app.add_middleware(
 class ModelConfig(BaseModel):
     """Configuration for regime model"""
     # Signal weights
-    weight_defcyc: float = 2.0
-    weight_lobhib: float = 0.0  # Disabled
+    weight_defcyc: float = 3.0
+    weight_lobhib: float = 0.0  # Disabled in live Excel config
     weight_valgrw: float = 2.0
-    weight_hidivmkt: float = 3.0
+    weight_hidivmkt: float = 2.0
     weight_crdsprd: float = 2.0
     
     # Thresholds
@@ -62,7 +62,7 @@ class ModelConfig(BaseModel):
     zscore_strong: float = 1.5
     
     # Baskets (cyclical)
-    cyclical_etfs: List[str] = ["XLF", "XLI", "XLB"]
+    cyclical_etfs: List[str] = ["XLF", "XLI", "XLK"]
 
 class PortfolioAllocation(BaseModel):
     """Portfolio allocation for each regime"""
@@ -232,6 +232,19 @@ def calculate_signals(prices: pd.DataFrame, config: ModelConfig) -> pd.DataFrame
     )
     signals['Wt_DefCyc'] = signals['Sc_DefCyc'] * config.weight_defcyc
     
+    # 1b. LoBHiB - Low Beta vs High Beta (SPLV − SPHB)
+    if 'SPLV' in prices.columns and 'SPHB' in prices.columns:
+        signals['Spr_LoBHiB'] = momentum['SPLV'] - momentum['SPHB']
+        signals['Z_LoBHiB'] = calculate_rolling_zscore(signals['Spr_LoBHiB'], config.zscore_window)
+        signals['Sc_LoBHiB'] = signals['Z_LoBHiB'].apply(
+            lambda x: zscore_to_discrete(x, config.zscore_moderate, config.zscore_strong)
+        )
+        signals['Wt_LoBHiB'] = signals['Sc_LoBHiB'] * config.weight_lobhib
+    else:
+        signals['Z_LoBHiB'] = 0
+        signals['Sc_LoBHiB'] = 0
+        signals['Wt_LoBHiB'] = 0
+    
     # 2. ValGrw - Value vs Growth
     if 'RPV' in prices.columns and 'RPG' in prices.columns:
         signals['Spr_ValGrw'] = momentum['RPV'] - momentum['RPG']
@@ -255,8 +268,8 @@ def calculate_signals(prices: pd.DataFrame, config: ModelConfig) -> pd.DataFrame
         signals['Wt_HiDivMkt'] = 0
     
     # 4. CrdSprd - Credit Spread
-    if 'VSCH' in prices.columns and 'HYG' in prices.columns:
-        signals['Spr_CrdSprd'] = momentum['VSCH'] - momentum['HYG']
+    if 'VCSH' in prices.columns and 'HYG' in prices.columns:
+        signals['Spr_CrdSprd'] = momentum['VCSH'] - momentum['HYG']
         signals['Z_CrdSprd'] = calculate_rolling_zscore(signals['Spr_CrdSprd'], config.zscore_window)
         signals['Sc_CrdSprd'] = signals['Z_CrdSprd'].apply(
             lambda x: zscore_to_discrete(x, config.zscore_moderate, config.zscore_strong)
@@ -265,9 +278,10 @@ def calculate_signals(prices: pd.DataFrame, config: ModelConfig) -> pd.DataFrame
     else:
         signals['Wt_CrdSprd'] = 0
     
-    # Composite score
+    # Composite score (weighted sum of all 5 signal discrete scores)
     signals['Composite'] = (
         signals['Wt_DefCyc'] + 
+        signals['Wt_LoBHiB'] + 
         signals['Wt_ValGrw'] + 
         signals['Wt_HiDivMkt'] + 
         signals['Wt_CrdSprd']
@@ -422,7 +436,7 @@ async def run_backtest(request: BacktestRequest):
         
         # Collect all unique tickers needed
         all_tickers = set(
-            ["XLU", "XLP", "XLV", "RPV", "RPG", "VYM", "SPY", "VSCH", "HYG"] +
+            ["XLU", "XLP", "XLV", "SPLV", "SPHB", "RPV", "RPG", "VYM", "SPY", "VCSH", "HYG"] +
             request.config.cyclical_etfs +
             list(request.portfolio.risk_on.keys()) +
             list(request.portfolio.neutral.keys()) +
@@ -508,7 +522,7 @@ async def get_current_regime(config: ModelConfig):
         end_date = datetime.now()
         start_date = end_date - timedelta(days=365*6)
         
-        tickers = ["XLU", "XLP", "XLV", "RPV", "RPG", "VYM", "SPY", "VSCH", "HYG"] + config.cyclical_etfs
+        tickers = ["XLU", "XLP", "XLV", "SPLV", "SPHB", "RPV", "RPG", "VYM", "SPY", "VCSH", "HYG"] + config.cyclical_etfs
         
         prices = fetch_price_data(
             tickers,
@@ -538,11 +552,31 @@ async def get_current_regime(config: ModelConfig):
             "ewma_score": sf(latest['EWMA_Score']),  # legacy single-EWMA
             "composite_score": sf(latest['Composite']),
             "threshold_momdiv": float(config.threshold_momdiv),
+            "baskets": {
+                "defensive": ["XLU", "XLP", "XLV"],
+                "cyclical": config.cyclical_etfs,
+                "value": ["RPV"], "growth": ["RPG"],
+                "high_div": ["VYM"], "market": ["SPY"],
+                "low_beta": ["SPLV"], "high_beta": ["SPHB"],
+                "credit_safe": ["VCSH"], "credit_risk": ["HYG"]
+            },
+            "weights": {
+                "defcyc": config.weight_defcyc,
+                "lobhib": config.weight_lobhib,
+                "valgrw": config.weight_valgrw,
+                "hidivmkt": config.weight_hidivmkt,
+                "crdsprd": config.weight_crdsprd
+            },
             "signals": {
                 "defcyc": {
                     "z_score": sf(latest['Z_DefCyc']),
                     "discrete": int(latest['Sc_DefCyc']),
                     "weighted": sf(latest['Wt_DefCyc'])
+                },
+                "lobhib": {
+                    "z_score": sf(latest.get('Z_LoBHiB', 0)),
+                    "discrete": int(latest.get('Sc_LoBHiB', 0) or 0),
+                    "weighted": sf(latest.get('Wt_LoBHiB', 0))
                 },
                 "valgrw": {
                     "z_score": sf(latest.get('Z_ValGrw', 0)),
