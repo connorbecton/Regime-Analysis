@@ -40,7 +40,7 @@ export default function ConfigEditor({ config, setConfig }) {
                 className="input font-mono"
               />
               <p className="text-xs text-gray-500 mt-1">
-                XLU/XLP/XLV vs XLF/XLI/XLB
+                XLU/XLP/XLV vs XLF/XLI/XLK
               </p>
             </div>
 
@@ -77,7 +77,7 @@ export default function ConfigEditor({ config, setConfig }) {
                 onChange={(e) => updateConfig('weight_crdsprd', e.target.value)}
                 className="input font-mono"
               />
-              <p className="text-xs text-gray-500 mt-1">VSCH vs HYG</p>
+              <p className="text-xs text-gray-500 mt-1">VCSH vs HYG</p>
             </div>
 
             <div>
@@ -88,9 +88,8 @@ export default function ConfigEditor({ config, setConfig }) {
                 value={config.weight_lobhib}
                 onChange={(e) => updateConfig('weight_lobhib', e.target.value)}
                 className="input font-mono"
-                disabled
               />
-              <p className="text-xs text-gray-500 mt-1">Disabled (redundant)</p>
+              <p className="text-xs text-gray-500 mt-1">SPLV vs SPHB (set to 0 in Excel)</p>
             </div>
           </div>
         )}
