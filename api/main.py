@@ -46,10 +46,16 @@ class ModelConfig(BaseModel):
     threshold_defensive: float = 7.0
     threshold_riskon: float = -7.0
     
-    # EWMA parameters
+    # EWMA parameters (single-EWMA legacy fields, kept for compat)
     ewma_span: int = 6
     momentum_lookback: int = 13
     zscore_window: int = 252
+
+    # MomDiv / Speed-Adjusted Blend parameters (primary regime signal)
+    ewma_span_fast: int = 3          # Short, aggressive smoother
+    ewma_span_slow: int = 5          # Long, conservative smoother
+    lambda_blend: float = 0.8        # Divergence weight in blend
+    threshold_momdiv: float = 4.0    # Entry threshold on |MomDiv_Score|
     
     # Z-score thresholds
     zscore_moderate: float = 0.75
@@ -267,22 +273,44 @@ def calculate_signals(prices: pd.DataFrame, config: ModelConfig) -> pd.DataFrame
         signals['Wt_CrdSprd']
     )
     
-    # EWMA smoothing
+    # Single-EWMA smoothing (kept for reference / legacy chart overlays)
     signals['EWMA_Score'] = signals['Composite'].ewm(span=config.ewma_span, adjust=False).mean()
-    
-    # Regime classification
+
+    # ------------------------------------------------------------------
+    # Speed-Adjusted Blend / MomDiv regime signal
+    # ------------------------------------------------------------------
+    # Two EWMAs of the composite:
+    #   fast (short span, aggressive)
+    #   slow (long span, conservative)
+    # Divergence = fast - slow (this is the NEWMA detection statistic).
+    # MomDiv score = slow + lambda * divergence; regime classified off MomDiv.
+    # Reference: Keriven, Garreau, Poli (2020), arXiv:1805.08061.
+    # ------------------------------------------------------------------
+    signals['EWMA_Fast'] = signals['Composite'].ewm(
+        span=config.ewma_span_fast, adjust=False
+    ).mean()
+    signals['EWMA_Slow'] = signals['Composite'].ewm(
+        span=config.ewma_span_slow, adjust=False
+    ).mean()
+    signals['MomDiv_Divergence'] = signals['EWMA_Fast'] - signals['EWMA_Slow']
+    signals['MomDiv_Score'] = (
+        signals['EWMA_Slow']
+        + config.lambda_blend * signals['MomDiv_Divergence']
+    )
+
+    # Regime classification off MomDiv with single entry threshold (+/-threshold_momdiv)
     def classify_regime(score):
         if pd.isna(score):
             return 'Neutral'
-        if score >= config.threshold_defensive:
+        if score >= config.threshold_momdiv:
             return 'Defensive'
-        elif score <= config.threshold_riskon:
+        elif score <= -config.threshold_momdiv:
             return 'Risk-On'
         else:
             return 'Neutral'
-    
-    signals['Regime'] = signals['EWMA_Score'].apply(classify_regime)
-    
+
+    signals['Regime'] = signals['MomDiv_Score'].apply(classify_regime)
+
     return signals
 
 def backtest_portfolio(prices: pd.DataFrame, signals: pd.DataFrame, 
@@ -427,16 +455,25 @@ async def run_backtest(request: BacktestRequest):
 
         # Get current regime
         current_regime = signals['Regime'].iloc[-1]
+        current_momdiv = _sf(signals['MomDiv_Score'].iloc[-1])
+        current_fast = _sf(signals['EWMA_Fast'].iloc[-1])
+        current_slow = _sf(signals['EWMA_Slow'].iloc[-1])
+        current_div = _sf(signals['MomDiv_Divergence'].iloc[-1])
         current_ewma = _sf(signals['EWMA_Score'].iloc[-1])
         current_composite = _sf(signals['Composite'].iloc[-1])
-        
+
         return {
             "success": True,
             "config": request.config.dict(),
             "current_regime": {
                 "regime": current_regime,
+                "momdiv_score": current_momdiv,
+                "fast_ewma": current_fast,
+                "slow_ewma": current_slow,
+                "divergence": current_div,
                 "ewma_score": current_ewma,
                 "composite_score": current_composite,
+                "threshold_momdiv": float(request.config.threshold_momdiv),
                 "date": signals.index[-1].strftime("%Y-%m-%d")
             },
             "regime_summary": {
@@ -448,11 +485,14 @@ async def run_backtest(request: BacktestRequest):
             "signal_history": [
                 {
                     "date": idx.strftime("%Y-%m-%d"),
+                    "momdiv_score": float(row['MomDiv_Score']) if pd.notna(row['MomDiv_Score']) else None,
+                    "fast_ewma": float(row['EWMA_Fast']) if pd.notna(row['EWMA_Fast']) else None,
+                    "slow_ewma": float(row['EWMA_Slow']) if pd.notna(row['EWMA_Slow']) else None,
                     "ewma_score": float(row['EWMA_Score']) if pd.notna(row['EWMA_Score']) else None,
                     "composite": float(row['Composite']) if pd.notna(row['Composite']) else None,
                     "regime": row['Regime'],
                 }
-                for idx, row in signals[['EWMA_Score', 'Composite', 'Regime']].tail(52).iterrows()
+                for idx, row in signals[['MomDiv_Score', 'EWMA_Fast', 'EWMA_Slow', 'EWMA_Score', 'Composite', 'Regime']].tail(52).iterrows()
             ]
         }
         
@@ -491,8 +531,13 @@ async def get_current_regime(config: ModelConfig):
         return {
             "date": signals.index[-1].strftime("%Y-%m-%d"),
             "regime": latest['Regime'],
-            "ewma_score": sf(latest['EWMA_Score']),
+            "momdiv_score": sf(latest['MomDiv_Score']),
+            "fast_ewma": sf(latest['EWMA_Fast']),
+            "slow_ewma": sf(latest['EWMA_Slow']),
+            "divergence": sf(latest['MomDiv_Divergence']),
+            "ewma_score": sf(latest['EWMA_Score']),  # legacy single-EWMA
             "composite_score": sf(latest['Composite']),
+            "threshold_momdiv": float(config.threshold_momdiv),
             "signals": {
                 "defcyc": {
                     "z_score": sf(latest['Z_DefCyc']),

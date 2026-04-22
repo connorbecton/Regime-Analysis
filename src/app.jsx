@@ -21,7 +21,12 @@ function App() {
     zscore_window: 252,
     zscore_moderate: 0.75,
     zscore_strong: 1.5,
-    cyclical_etfs: ['XLF', 'XLI', 'XLB']
+    cyclical_etfs: ['XLF', 'XLI', 'XLB'],
+    // MomDiv (speed-adjusted blend) params
+    ewma_span_fast: 3,
+    ewma_span_slow: 5,
+    lambda_blend: 0.8,
+    threshold_momdiv: 4.0
   })
 
   const [portfolio, setPortfolio] = useState({
@@ -109,7 +114,7 @@ function App() {
                 Market Regime Detection
               </h1>
               <p className="text-sm text-gray-600 mt-1">
-                Enhanced Momentum Model v2.0 - Live Backtesting
+                Enhanced Momentum Model v3 · MomDiv (Speed-Adjusted Blend)
               </p>
             </div>
             
@@ -220,8 +225,8 @@ function App() {
       <footer className="bg-white border-t border-gray-200 mt-16">
         <div className="max-w-7xl mx-auto px-6 py-6">
           <p className="text-sm text-gray-600 text-center">
-            Data sourced from Yahoo Finance (dividend-adjusted) • 
-            Model: 5-signal EWMA regime detection with ±7 thresholds
+            Data sourced from stooq.com (weekly close) ·
+            Model: MomDiv (dual-EWMA speed-adjusted blend) · ±4 regime threshold
           </p>
         </div>
       </footer>
