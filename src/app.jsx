@@ -225,7 +225,7 @@ function App() {
       <footer className="bg-white border-t border-gray-200 mt-16">
         <div className="max-w-7xl mx-auto px-6 py-6">
           <p className="text-sm text-gray-600 text-center">
-            Data sourced from stooq.com (weekly close) ·
+            Data sourced from Tiingo (weekly adjusted close) ·
             Model: MomDiv (dual-EWMA speed-adjusted blend) · ±4 regime threshold
           </p>
         </div>
