@@ -546,6 +546,8 @@ async def run_backtest(request: BacktestRequest):
             ]
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Backtest error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -636,6 +638,8 @@ async def get_current_regime(config: ModelConfig):
             }
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Current regime error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
