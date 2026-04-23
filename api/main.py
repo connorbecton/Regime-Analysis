@@ -4,13 +4,14 @@ FastAPI backend for regime model backtesting
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from mangum import Mangum
 from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
-import traceback
+import os
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -97,58 +98,53 @@ class BacktestRequest(BaseModel):
 # ============================================================================
 
 def _make_session() -> requests.Session:
-    """Plain requests session with a browser User-Agent."""
     session = requests.Session()
-    session.headers.update({
-        'User-Agent': (
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/120.0.0.0 Safari/537.36'
-        ),
-    })
+    session.headers.update({'Content-Type': 'application/json'})
     return session
 
 
 def _fetch_one_ticker(ticker: str, start_date: str, end_date: str,
-                      session: requests.Session) -> pd.Series:
-    """
-    Fetch weekly close prices from stooq.com for a single ticker.
-    stooq serves plain CSV with no auth — cloud IPs are not blocked.
-    Returns a Series indexed by date.
-    """
-    from io import StringIO
-
-    d1 = start_date.replace('-', '')  # YYYYMMDD
-    d2 = end_date.replace('-', '')
-    stooq_ticker = ticker.lower() + '.us'
-
-    url = f"https://stooq.com/q/d/l/?s={stooq_ticker}&d1={d1}&d2={d2}&i=w"
-    resp = session.get(url, timeout=15)
+                      api_key: str, session: requests.Session) -> pd.Series:
+    """Fetch weekly dividend-adjusted prices from Tiingo for a single ticker."""
+    url = f"https://api.tiingo.com/tiingo/daily/{ticker}/prices"
+    params = {
+        'startDate': start_date,
+        'endDate': end_date,
+        'resampleFreq': 'weekly',
+        'token': api_key,
+    }
+    resp = session.get(url, params=params, timeout=15)
     resp.raise_for_status()
 
-    content = resp.text.strip()
-    # stooq returns an HTML page or a short message when ticker is unknown
-    if not content or content.startswith('<') or len(content.splitlines()) < 2:
-        raise ValueError(f"No data from stooq for {ticker} (ticker may not exist there)")
+    data = resp.json()
+    if not data:
+        raise ValueError(f"No data from Tiingo for {ticker}")
 
-    df = pd.read_csv(StringIO(content), parse_dates=['Date'])
-    df = df.set_index('Date').sort_index()
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date']).dt.tz_convert(None)
+    df = df.set_index('date').sort_index()
 
-    if 'Close' not in df.columns:
-        raise ValueError(f"Unexpected stooq format for {ticker}: {df.columns.tolist()}")
-
-    return df['Close'].rename(ticker).dropna()
+    price_col = 'adjClose' if 'adjClose' in df.columns else 'close'
+    return df[price_col].rename(ticker).dropna()
 
 
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Fetch price data from stooq.com for all tickers in parallel.
-    stooq.com is used instead of Yahoo Finance because Yahoo Finance actively
-    blocks cloud provider IPs with 429 errors (even the auth endpoint).
-    Returns weekly Friday-resampled prices.
+    Fetch weekly dividend-adjusted price data from Tiingo for all tickers in parallel.
+    Requires TIINGO_API_KEY environment variable (free key at tiingo.com).
     """
-    logger.info(f"Fetching {len(tickers)} tickers from stooq.com ({start_date} to {end_date})")
+    api_key = os.environ.get('TIINGO_API_KEY', '')
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "TIINGO_API_KEY environment variable is not set. "
+                "Get a free API key at https://www.tiingo.com and add it to your "
+                "Vercel project environment variables."
+            )
+        )
 
+    logger.info(f"Fetching {len(tickers)} tickers from Tiingo ({start_date} to {end_date})")
     session = _make_session()
 
     def fetch_with_retry(ticker: str):
@@ -157,7 +153,7 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
             try:
                 if attempt > 0:
                     time.sleep(attempt)
-                return ticker, _fetch_one_ticker(ticker, start_date, end_date, session)
+                return ticker, _fetch_one_ticker(ticker, start_date, end_date, api_key, session)
             except Exception as e:
                 last_err = e
                 logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
@@ -175,7 +171,7 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
     if not close_series:
         raise HTTPException(
             status_code=500,
-            detail="Could not fetch data for any ticker from Yahoo Finance."
+            detail="Could not fetch data for any ticker from Tiingo."
         )
 
     df = pd.DataFrame(close_series)
@@ -600,5 +596,5 @@ async def get_current_regime(config: ModelConfig):
         logger.error(f"Current regime error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# For Vercel serverless deployment
-app = app
+# Vercel serverless entry point — mangum adapts ASGI (FastAPI) to the handler protocol
+handler = Mangum(app, lifespan="off")

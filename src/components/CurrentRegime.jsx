@@ -71,30 +71,30 @@ export default function CurrentRegime({ data }) {
       </div>
 
       {/* EWMA Context Row */}
-      {(fast \!== undefined || slow \!== undefined) && (
+      {(fast !== undefined || slow !== undefined) && (
         <div className="mt-4 pt-4 border-t border-blue-200 grid grid-cols-2 md:grid-cols-4 gap-4">
           <div>
             <div className="text-xs text-gray-500 uppercase">Fast EWMA (span {data.config_fast ?? 3})</div>
             <div className="text-lg font-mono font-semibold">
-              {fast \!== null && fast \!== undefined ? Number(fast).toFixed(2) : '—'}
+              {fast !== null && fast !== undefined ? Number(fast).toFixed(2) : '—'}
             </div>
           </div>
           <div>
             <div className="text-xs text-gray-500 uppercase">Slow EWMA (span {data.config_slow ?? 5})</div>
             <div className="text-lg font-mono font-semibold">
-              {slow \!== null && slow \!== undefined ? Number(slow).toFixed(2) : '—'}
+              {slow !== null && slow !== undefined ? Number(slow).toFixed(2) : '—'}
             </div>
           </div>
           <div>
             <div className="text-xs text-gray-500 uppercase">Divergence (Fast - Slow)</div>
             <div className="text-lg font-mono font-semibold">
-              {divergence \!== null && divergence \!== undefined ? Number(divergence).toFixed(2) : '—'}
+              {divergence !== null && divergence !== undefined ? Number(divergence).toFixed(2) : '—'}
             </div>
           </div>
           <div>
             <div className="text-xs text-gray-500 uppercase">Legacy EWMA Score</div>
             <div className="text-lg font-mono font-semibold text-gray-500">
-              {data.ewma_score \!== undefined ? Number(data.ewma_score).toFixed(2) : '—'}
+              {data.ewma_score !== undefined ? Number(data.ewma_score).toFixed(2) : '—'}
             </div>
           </div>
         </div>
@@ -109,7 +109,7 @@ export default function CurrentRegime({ data }) {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
             {Object.entries(SIGNAL_META).map(([key, meta]) => {
               const signal = data.signals[key]
-              if (\!signal) return null
+              if (!signal) return null
               const w = weights[meta.wKey]
               const basketStr =
                 meta.basketA && meta.basketB
@@ -119,7 +119,7 @@ export default function CurrentRegime({ data }) {
                 <div key={key} className="bg-white rounded-lg p-3 border border-gray-200">
                   <div className="flex items-center justify-between mb-1">
                     <div className="text-xs text-gray-500 uppercase font-semibold">{meta.label}</div>
-                    {w \!== undefined && (
+                    {w !== undefined && (
                       <div className="text-[10px] text-gray-400">w={w}</div>
                     )}
                   </div>
