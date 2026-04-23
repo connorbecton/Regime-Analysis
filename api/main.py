@@ -596,5 +596,5 @@ async def get_current_regime(config: ModelConfig):
         logger.error(f"Current regime error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Vercel serverless entry point — mangum adapts ASGI (FastAPI) to the handler protocol
+# Vercel serverless entry point — mangum adapts ASGI (FastAPI) to AWS Lambda / Vercel handler protocol
 handler = Mangum(app, lifespan="off")
