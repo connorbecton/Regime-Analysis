@@ -109,7 +109,7 @@ export default function CurrentRegime({ data }) {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
             {Object.entries(SIGNAL_META).map(([key, meta]) => {
               const signal = data.signals[key]
-              if (\!signal) return null
+              if (!signal) return null
               const w = weights[meta.wKey]
               const basketStr =
                 meta.basketA && meta.basketB
@@ -119,7 +119,7 @@ export default function CurrentRegime({ data }) {
                 <div key={key} className="bg-white rounded-lg p-3 border border-gray-200">
                   <div className="flex items-center justify-between mb-1">
                     <div className="text-xs text-gray-500 uppercase font-semibold">{meta.label}</div>
-                    {w \!== undefined && (
+                    {w !== undefined && (
                       <div className="text-[10px] text-gray-400">w={w}</div>
                     )}
                   </div>
