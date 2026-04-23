@@ -105,8 +105,9 @@ def _make_session() -> requests.Session:
     return session
 
 
-def _fetch_one_ticker(ticker: str, start_date: str, end_date: str,
-                      api_key: str, session: requests.Session) -> pd.Series:
+def _fetch_one_ticker_tiingo(
+    ticker: str, start_date: str, end_date: str, api_key: str, session: requests.Session
+) -> pd.Series:
     """Fetch weekly dividend-adjusted prices from Tiingo for a single ticker."""
     url = f"https://api.tiingo.com/tiingo/daily/{ticker}/prices"
     params = {
@@ -130,24 +131,48 @@ def _fetch_one_ticker(ticker: str, start_date: str, end_date: str,
     return df[price_col].rename(ticker).dropna()
 
 
+def _fetch_one_ticker_stooq(
+    ticker: str, start_date: str, end_date: str, session: requests.Session
+) -> pd.Series:
+    """
+    Fallback data source for weekly prices (Stooq CSV endpoint, no API key required).
+    Uses close prices and normalizes to Friday weekly sampling.
+    """
+    symbol = f"{ticker.lower()}.us"
+    url = "https://stooq.com/q/d/l/"
+    params = {'s': symbol, 'i': 'w'}
+    resp = session.get(url, params=params, timeout=15)
+    resp.raise_for_status()
+
+    text = resp.text.strip()
+    if not text or "No data" in text:
+        raise ValueError(f"No data from Stooq for {ticker}")
+
+    from io import StringIO
+    df = pd.read_csv(StringIO(text))
+    if 'Date' not in df.columns or 'Close' not in df.columns:
+        raise ValueError(f"Unexpected Stooq payload for {ticker}")
+
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.set_index('Date').sort_index()
+    df = df.loc[(df.index >= pd.Timestamp(start_date)) & (df.index <= pd.Timestamp(end_date))]
+    if df.empty:
+        raise ValueError(f"No Stooq rows in requested date range for {ticker}")
+
+    return df['Close'].rename(ticker).dropna()
+
+
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch weekly dividend-adjusted price data from Tiingo for all tickers in parallel.
     Requires TIINGO_API_KEY environment variable (free key at tiingo.com).
     """
-    api_key = os.environ.get('TIINGO_API_KEY', '')
-    if not api_key:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "TIINGO_API_KEY environment variable is not set. "
-                "Get a free API key at https://www.tiingo.com and add it to your "
-                "Vercel project environment variables."
-            )
-        )
+    api_key = os.environ.get('TIINGO_API_KEY', '').strip()
 
-    logger.info(f"Fetching {len(tickers)} tickers from Tiingo ({start_date} to {end_date})")
+    logger.info(f"Fetching {len(tickers)} tickers ({start_date} to {end_date})")
     session = _make_session()
+    if not api_key:
+        logger.warning("TIINGO_API_KEY not set; using Stooq fallback for all tickers.")
 
     def fetch_with_retry(ticker: str):
         last_err = None
@@ -155,10 +180,23 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
             try:
                 if attempt > 0:
                     time.sleep(attempt)
-                return ticker, _fetch_one_ticker(ticker, start_date, end_date, api_key, session)
+                if api_key:
+                    return ticker, _fetch_one_ticker_tiingo(
+                        ticker, start_date, end_date, api_key, session
+                    )
+                return ticker, _fetch_one_ticker_stooq(ticker, start_date, end_date, session)
             except Exception as e:
                 last_err = e
                 logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
+
+        # Fallback path when Tiingo token is configured but calls fail/reject.
+        if api_key:
+            try:
+                logger.warning(f"Trying Stooq fallback for {ticker}")
+                return ticker, _fetch_one_ticker_stooq(ticker, start_date, end_date, session)
+            except Exception as fallback_err:
+                last_err = fallback_err
+
         logger.error(f"Giving up on {ticker}: {last_err}")
         return ticker, None
 
@@ -173,7 +211,10 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
     if not close_series:
         raise HTTPException(
             status_code=500,
-            detail="Could not fetch data for any ticker from Tiingo."
+            detail=(
+                "Could not fetch data for any ticker from either Tiingo or "
+                "the Stooq fallback source."
+            )
         )
 
     df = pd.DataFrame(close_series)
