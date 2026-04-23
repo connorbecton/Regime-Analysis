@@ -64,6 +64,8 @@ class ModelConfig(BaseModel):
     
     # Baskets (cyclical)
     cyclical_etfs: List[str] = ["XLF", "XLI", "XLK"]
+    half_life: int = 4
+    hysteresis: bool = True
 
 class PortfolioAllocation(BaseModel):
     """Portfolio allocation for each regime"""
@@ -181,15 +183,33 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
     logger.info(f"Fetched {len(df)} weeks for {len(df.columns)}/{len(tickers)} tickers")
     return df
 
-def calculate_momentum(prices: pd.DataFrame, lookback: int = 13) -> pd.DataFrame:
-    """Calculate log momentum over lookback period"""
-    return np.log(prices / prices.shift(lookback))
+def calculate_momentum(prices: pd.DataFrame, lookback: int = 13, half_life: int = 4) -> pd.DataFrame:
+    """
+    Exponentially-weighted momentum matching Excel's formula.
+    Computes a weighted average of the last `lookback` weekly log returns,
+    with recency weighting: w_k = e^(-λ·k), λ = ln(2)/half_life, k=0 most recent.
+    Returns NaN where fewer than `lookback` returns are available.
+    """
+    lam = np.log(2) / half_life
+    # Weights ordered oldest→newest to align with rolling window's raw array order
+    w = np.exp(-lam * np.arange(lookback - 1, -1, -1))
+    w /= w.sum()
 
-def calculate_rolling_zscore(series: pd.Series, window: int = 252) -> pd.Series:
-    """Calculate rolling z-score"""
-    rolling_mean = series.rolling(window=window, min_periods=30).mean()
-    rolling_std = series.rolling(window=window, min_periods=30).std()
-    return (series - rolling_mean) / rolling_std
+    log_returns = np.log(prices / prices.shift(1))
+    return log_returns.rolling(window=lookback, min_periods=lookback).apply(
+        lambda arr: np.dot(arr, w), raw=True
+    )
+
+def calculate_rolling_zscore(series: pd.Series, window: int = 252, min_periods: int = 30) -> pd.Series:
+    """
+    Expanding-then-rolling z-score matching Excel's logic:
+    window grows from min_periods up to `window`, then fixes at `window`.
+    NaN when fewer than min_periods observations are available.
+    """
+    roll = series.rolling(window=window, min_periods=min_periods)
+    mu = roll.mean()
+    sigma = roll.std(ddof=1).replace(0, np.nan)
+    return (series - mu) / sigma
 
 def zscore_to_discrete(z: float, moderate: float = 0.75, strong: float = 1.5) -> int:
     """Map z-score to discrete score (-2 to +2)"""
@@ -211,16 +231,17 @@ def calculate_signals(prices: pd.DataFrame, config: ModelConfig) -> pd.DataFrame
     
     # Define ETF baskets
     defensive_etfs = ["XLU", "XLP", "XLV"]
-    cyclical_etfs = config.cyclical_etfs
-    
-    # Calculate momentum
-    momentum = calculate_momentum(prices, config.momentum_lookback)
-    
+    # Full 6-sector cyclical basket for DefCyc spread (matches Excel model)
+    _all_cyclicals = ["XLF", "XLY", "XLI", "XLB", "XLK", "XLC"]
+
+    # Calculate momentum (EWMA-weighted)
+    momentum = calculate_momentum(prices, config.momentum_lookback, config.half_life)
+
     signals = pd.DataFrame(index=prices.index)
-    
-    # 1. DefCyc - Defensive vs Cyclical
-    def_mom = momentum[defensive_etfs].mean(axis=1)
-    cyc_mom = momentum[cyclical_etfs].mean(axis=1)
+
+    # 1. DefCyc - Defensive vs Cyclical (full 6-sector short basket)
+    def_mom = momentum[[t for t in defensive_etfs if t in prices.columns]].mean(axis=1)
+    cyc_mom = momentum[[t for t in _all_cyclicals if t in prices.columns]].mean(axis=1)
     signals['Spr_DefCyc'] = def_mom - cyc_mom
     signals['Z_DefCyc'] = calculate_rolling_zscore(signals['Spr_DefCyc'], config.zscore_window)
     signals['Sc_DefCyc'] = signals['Z_DefCyc'].apply(
@@ -308,18 +329,36 @@ def calculate_signals(prices: pd.DataFrame, config: ModelConfig) -> pd.DataFrame
         + config.lambda_blend * signals['MomDiv_Divergence']
     )
 
-    # Regime classification off MomDiv with single entry threshold (+/-threshold_momdiv)
-    def classify_regime(score):
-        if pd.isna(score):
+    # Regime classification: stateful Schmitt-trigger (hysteresis) or pointwise
+    T = config.threshold_momdiv
+    if config.hysteresis:
+        state = 'Neutral'
+        regimes = []
+        for s in signals['MomDiv_Score']:
+            if not pd.isna(s):
+                if state == 'Neutral':
+                    if s >= T:
+                        state = 'Defensive'
+                    elif s <= -T:
+                        state = 'Risk-On'
+                elif state == 'Defensive':
+                    if s < T:
+                        state = 'Risk-On' if s <= -T else 'Neutral'
+                else:  # Risk-On
+                    if s > -T:
+                        state = 'Defensive' if s >= T else 'Neutral'
+            regimes.append(state)
+        signals['Regime'] = regimes
+    else:
+        def classify_regime(score):
+            if pd.isna(score):
+                return 'Neutral'
+            if score >= T:
+                return 'Defensive'
+            elif score <= -T:
+                return 'Risk-On'
             return 'Neutral'
-        if score >= config.threshold_momdiv:
-            return 'Defensive'
-        elif score <= -config.threshold_momdiv:
-            return 'Risk-On'
-        else:
-            return 'Neutral'
-
-    signals['Regime'] = signals['MomDiv_Score'].apply(classify_regime)
+        signals['Regime'] = signals['MomDiv_Score'].apply(classify_regime)
 
     return signals
 
@@ -432,7 +471,8 @@ async def run_backtest(request: BacktestRequest):
         
         # Collect all unique tickers needed
         all_tickers = set(
-            ["XLU", "XLP", "XLV", "SPLV", "SPHB", "RPV", "RPG", "VYM", "SPY", "VCSH", "HYG"] +
+            ["XLU", "XLP", "XLV", "XLF", "XLY", "XLI", "XLB", "XLK", "XLC",
+             "SPLV", "SPHB", "RPV", "RPG", "VYM", "SPY", "VCSH", "HYG"] +
             request.config.cyclical_etfs +
             list(request.portfolio.risk_on.keys()) +
             list(request.portfolio.neutral.keys()) +
@@ -518,7 +558,11 @@ async def get_current_regime(config: ModelConfig):
         end_date = datetime.now()
         start_date = end_date - timedelta(days=365*6)
         
-        tickers = ["XLU", "XLP", "XLV", "SPLV", "SPHB", "RPV", "RPG", "VYM", "SPY", "VCSH", "HYG"] + config.cyclical_etfs
+        tickers = list(set(
+            ["XLU", "XLP", "XLV", "XLF", "XLY", "XLI", "XLB", "XLK", "XLC",
+             "SPLV", "SPHB", "RPV", "RPG", "VYM", "SPY", "VCSH", "HYG"] +
+            config.cyclical_etfs
+        ))
         
         prices = fetch_price_data(
             tickers,
