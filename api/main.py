@@ -162,51 +162,6 @@ def _fetch_one_ticker_stooq(
     return df['Close'].rename(ticker).dropna()
 
 
-def _fetch_one_ticker_yahoo(
-    ticker: str, start_date: str, end_date: str, session: requests.Session
-) -> pd.Series:
-    """
-    Fallback data source using Yahoo Finance chart API (no key required).
-    Prefers adjusted close where available.
-    """
-    start_ts = int(pd.Timestamp(start_date).timestamp())
-    # Make end-date inclusive by adding one day.
-    end_ts = int((pd.Timestamp(end_date) + pd.Timedelta(days=1)).timestamp())
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {
-        'period1': start_ts,
-        'period2': end_ts,
-        'interval': '1wk',
-        'events': 'div,splits',
-    }
-    resp = session.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    payload = resp.json()
-
-    result = (payload.get('chart', {}) or {}).get('result')
-    if not result:
-        raise ValueError(f"No data from Yahoo for {ticker}")
-    result = result[0]
-
-    timestamps = result.get('timestamp') or []
-    quote = ((result.get('indicators') or {}).get('quote') or [{}])[0]
-    adjclose_obj = ((result.get('indicators') or {}).get('adjclose') or [{}])[0]
-    closes = adjclose_obj.get('adjclose') or quote.get('close') or []
-
-    if not timestamps or not closes:
-        raise ValueError(f"Empty Yahoo time series for {ticker}")
-
-    df = pd.DataFrame({
-        'date': pd.to_datetime(timestamps, unit='s', utc=True).tz_convert(None),
-        'close': closes,
-    }).dropna()
-    if df.empty:
-        raise ValueError(f"No Yahoo rows for {ticker}")
-
-    df = df.set_index('date').sort_index()
-    return df['close'].rename(ticker).dropna()
-
-
 def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch weekly dividend-adjusted price data from Tiingo for all tickers in parallel.
@@ -217,7 +172,7 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
     logger.info(f"Fetching {len(tickers)} tickers ({start_date} to {end_date})")
     session = _make_session()
     if not api_key:
-        logger.warning("TIINGO_API_KEY not set; using Yahoo/Stooq fallbacks.")
+        logger.warning("TIINGO_API_KEY not set; using Stooq fallback for all tickers.")
 
     def fetch_with_retry(ticker: str):
         last_err = None
@@ -229,18 +184,15 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
                     return ticker, _fetch_one_ticker_tiingo(
                         ticker, start_date, end_date, api_key, session
                     )
-                return ticker, _fetch_one_ticker_yahoo(ticker, start_date, end_date, session)
+                return ticker, _fetch_one_ticker_stooq(ticker, start_date, end_date, session)
             except Exception as e:
                 last_err = e
                 logger.warning(f"{ticker} attempt {attempt + 1} failed: {e}")
 
-        # Fallback path when primary source fails.
-        fallback_sources = ["Yahoo", "Stooq"] if api_key else ["Stooq"]
-        for source in fallback_sources:
+        # Fallback path when Tiingo token is configured but calls fail/reject.
+        if api_key:
             try:
-                logger.warning(f"Trying {source} fallback for {ticker}")
-                if source == "Yahoo":
-                    return ticker, _fetch_one_ticker_yahoo(ticker, start_date, end_date, session)
+                logger.warning(f"Trying Stooq fallback for {ticker}")
                 return ticker, _fetch_one_ticker_stooq(ticker, start_date, end_date, session)
             except Exception as fallback_err:
                 last_err = fallback_err
@@ -258,10 +210,10 @@ def fetch_price_data(tickers: List[str], start_date: str, end_date: str) -> pd.D
 
     if not close_series:
         raise HTTPException(
-            status_code=503,
+            status_code=500,
             detail=(
-                "Could not fetch data from any upstream provider (Tiingo, Yahoo, Stooq). "
-                "If this persists, verify TIINGO_API_KEY and outbound network access."
+                "Could not fetch data for any ticker from either Tiingo or "
+                "the Stooq fallback source."
             )
         )
 
